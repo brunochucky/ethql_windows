@@ -1,0 +1,74 @@
+version: 2
+jobs:
+  build-and-test:
+    docker:
+      - image: circleci/node:10
+    working_directory: /tmp/workspace
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+          - v1-dependencies-{{ checksum "yarn.lock" }}
+          - v1-dependencies-
+      - run:
+          name: Install dependencies
+          command: yarn install
+      - save_cache:
+          key: v1-dependencies-{{ checksum "yarn.lock" }}
+          paths:
+            - node_modules
+            - ~/.cache/yarn
+      - run: 
+          name: Run tests
+          command: yarn test
+      - run:
+          name: Build ethql
+          command: yarn build:ts
+      - persist_to_workspace:
+          root: /tmp
+          paths:
+            - workspace
+
+  deploy:
+    docker:
+      - image: docker:17.05.0-ce-git
+    working_directory: /tmp/workspace
+    steps:
+      - attach_workspace:
+          at: /tmp
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Build Docker image
+          command: docker image build -t ethql .
+      - run:
+          name: Install AWS CLI
+          working_directory: /
+          command: |
+            apk add --no-cache py-pip
+            pip install awscli==1.15.30
+            login="$(aws ecr get-login)"
+            ${login}
+      - run: 
+          name: Push Docker image to repo
+          command: |
+            docker tag ethql:latest ${DOCKER_REPO}/ethql:latest 
+            docker push ${DOCKER_REPO}/ethql:latest
+            docker tag ethql:latest ${DOCKER_REPO}/ethql:${CIRCLE_SHA1}
+            docker push ${DOCKER_REPO}/ethql:${CIRCLE_SHA1}
+      - run:
+          name: Deploy new version on ECS
+          command: |
+            aws ecs update-service --cluster ethql --service ethql-service --force-new-deployment
+
+workflows:
+  version: 2
+  build-test-deploy:
+    jobs:
+      - build-and-test
+      - deploy:
+          requires:
+            - build-and-test
+          filters:
+            branches:
+              only: master
